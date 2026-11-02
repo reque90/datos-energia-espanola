@@ -1,0 +1,11 @@
+# Entorno virtual y secretos
+.venv/
+.env
+
+# Datos en bruto (se descargan con el código)
+data/raw/
+
+# Configuración del IDE y cachés de Python
+.idea/
+__pycache__/
+*.pyc
