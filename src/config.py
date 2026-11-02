@@ -1,9 +1,10 @@
 """
 Configuración central del proyecto.
 
-Aquí están todas las rutas, el periodo de estudio, los IDs de los indicadores
-de ESIOS y los supuestos de la batería. Si hay que cambiar algo, se cambia aquí
-y el resto de scripts lo recogen automáticamente.
+Aquí están todas las rutas, el periodo de estudio, las URL y parámetros de las
+fuentes (OMIE, Energy-Charts y REData; todas públicas y sin token) y los supuestos
+de la batería. Si hay que cambiar algo, se cambia aquí y el resto de scripts
+lo recogen automáticamente.
 """
 
 from pathlib import Path
@@ -19,7 +20,8 @@ DATA_PROCESSED = RAIZ / "data" / "processed"
 DOCS = RAIZ / "docs"
 
 RAW_OMIE = DATA_RAW / "omie"      # ficheros diarios marginalpdbc_AAAAMMDD.1
-RAW_ESIOS = DATA_RAW / "esios"    # un CSV por indicador y mes
+RAW_ENERGY_CHARTS = DATA_RAW / "energy_charts"   # un CSV por mes: solar y demanda
+RAW_REDATA = DATA_RAW / "redata"                 # un CSV por año: solar diaria oficial de REE
 
 # ---------------------------------------------------------------------------
 # Periodo de estudio (fechas fijas para que el resultado sea reproducible)
@@ -37,15 +39,21 @@ OMIE_ULTIMO_ANIO_CON_ZIP = 2022   # hasta este año existe el zip anual
 OMIE_PAUSA_SEGUNDOS = 0.2         # pausa entre peticiones para no saturar el servidor
 
 # ---------------------------------------------------------------------------
-# ESIOS (Red Eléctrica) – IDs de indicadores (VERIFICAR en https://www.esios.ree.es)
+# Energy-Charts (Fraunhofer ISE) – solar y demanda (sin token)
 # ---------------------------------------------------------------------------
-ESIOS_URL = "https://api.esios.ree.es/indicators/{id}"
-ESIOS_INDICADORES = {
-    "solar_fv_mw": 1295,   # Generación T.Real solar fotovoltaica (MW)
-    "demanda_mw": 1293,    # Demanda real (MW)
-}
-ESIOS_ZONA_PREFERIDA = "Península"
-ESIOS_PAUSA_SEGUNDOS = 0.5
+ENERGY_CHARTS_URL = "https://api.energy-charts.info/public_power"
+ENERGY_CHARTS_PAIS = "es"
+ENERGY_CHARTS_SERIES = {"Solar": "solar_mw", "Load": "demanda_mw"}   # nombre en la API -> columna
+ENERGY_CHARTS_PAUSA_SEGUNDOS = 3   # la API devuelve 429 si se le pide demasiado rápido
+
+# ---------------------------------------------------------------------------
+# REData (Red Eléctrica) – solar diaria oficial peninsular, para validar (sin token)
+# ---------------------------------------------------------------------------
+REDATA_URL = "https://apidatos.ree.es/es/datos/generacion/estructura-generacion"
+REDATA_PARAMS = {"time_trunc": "day", "geo_trunc": "electric_system",
+                 "geo_limit": "peninsular", "geo_ids": "8741"}
+REDATA_SERIES = {"1458": "solar_fv_mwh", "1459": "solar_termica_mwh"}   # id de tecnología -> columna
+REDATA_PAUSA_SEGUNDOS = 1
 
 # ---------------------------------------------------------------------------
 # Supuestos de la batería

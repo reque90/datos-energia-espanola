@@ -14,37 +14,42 @@ baterías: cargar barato al mediodía y vender caro por la tarde-noche.
 ## Flujo de datos
 
 ```
- FUENTES                    PYTHON (src/)                       CSV                         POWER BI
-┌──────────────┐     ┌────────────────────┐
-│ OMIE         │────▶│ download_omie.py   │──┐
-│ precios      │     └────────────────────┘  │   ┌──────────┐    ┌────────────┐    ┌────────────────────────┐    ┌───────────┐
-└──────────────┘                             ├──▶│ clean.py │───▶│ metrics.py │───▶│ data/processed/*.csv   │───▶│ Dashboard │
-┌──────────────┐     ┌────────────────────┐  │   └──────────┘    └────────────┘    └────────────────────────┘    └───────────┘
-│ REE / ESIOS  │────▶│ download_esios.py  │──┘        │
-│ solar, demanda│    └────────────────────┘           └──▶ docs/calidad_datos.md
-└──────────────┘
-                     run_all.py ejecuta todo en orden
+ FUENTES (públicas, sin token)   PYTHON (src/)                          CSV                         POWER BI
+┌──────────────────┐     ┌──────────────────────────┐
+│ OMIE             │────▶│ download_omie.py         │──┐
+│ precios          │     └──────────────────────────┘  │
+└──────────────────┘                                   │   ┌──────────┐    ┌────────────┐    ┌────────────────────────┐    ┌───────────┐
+┌──────────────────┐     ┌──────────────────────────┐  ├──▶│ clean.py │───▶│ metrics.py │───▶│ data/processed/*.csv   │───▶│ Dashboard │
+│ Energy-Charts    │────▶│ download_energy_charts.py│──┤   └──────────┘    └────────────┘    └────────────────────────┘    └───────────┘
+│ solar, demanda   │     └──────────────────────────┘  │        │
+└──────────────────┘                                   │        ├──▶ data/processed/validacion_solar_diaria.csv
+┌──────────────────┐     ┌──────────────────────────┐  │        └──▶ docs/calidad_datos.md
+│ REE REData       │────▶│ download_redata.py       │──┘
+│ solar diaria     │     └──────────────────────────┘    (REData solo se usa para validar la solar)
+│ (validación)     │
+└──────────────────┘
+                         run_all.py ejecuta todo en orden
 ```
 
 ## Estructura del repositorio
 
 ```
 ├── src/
-│   ├── config.py          # rutas, periodo de estudio, IDs de ESIOS, supuestos de la batería
-│   ├── download_omie.py   # descarga precios del mercado diario (OMIE)
-│   ├── download_esios.py  # descarga solar FV y demanda (ESIOS, necesita token)
-│   ├── clean.py           # limpieza, paso a horario, informe de calidad
-│   ├── metrics.py         # métricas anuales, mensuales, batería y perfil hora×mes
-│   └── run_all.py         # ejecuta todo en orden
+│   ├── config.py                  # rutas, periodo de estudio, URL de las fuentes, supuestos de la batería
+│   ├── download_omie.py           # descarga precios del mercado diario (OMIE)
+│   ├── download_energy_charts.py  # descarga solar y demanda (Energy-Charts)
+│   ├── download_redata.py         # descarga la solar diaria oficial de REE (validación)
+│   ├── clean.py                   # limpieza, paso a horario, validación, informe de calidad
+│   ├── metrics.py                 # métricas anuales, mensuales, batería y perfil hora×mes
+│   └── run_all.py                 # ejecuta todo en orden
 ├── data/
-│   ├── raw/               # datos en bruto (NO se suben a git)
-│   └── processed/         # CSV limpios para Power BI (sí se suben)
+│   ├── raw/                       # datos en bruto (NO se suben a git)
+│   └── processed/                 # CSV limpios para Power BI (sí se suben)
 ├── docs/
-│   ├── calidad_datos.md   # informe de calidad (generado automáticamente)
-│   ├── decisiones.md      # decisiones de limpieza y análisis
-│   └── fuentes.md         # fuentes, licencias y citas
+│   ├── calidad_datos.md           # informe de calidad (generado automáticamente)
+│   ├── decisiones.md              # decisiones de limpieza y análisis
+│   └── fuentes.md                 # fuentes, licencias y citas
 ├── requirements.txt
-├── .env.example
 └── README.md
 ```
 
@@ -58,16 +63,13 @@ baterías: cargar barato al mediodía y vender caro por la tarde-noche.
    ```
    pip install -r requirements.txt
    ```
-4. **Token de ESIOS**: copiar `.env.example` a `.env` y poner el token personal
-   (se solicita gratis escribiendo a consultasios@ree.es):
-   ```
-   ESIOS_TOKEN=tu_token_aqui
-   ```
-   Sin token el proyecto funciona igualmente, pero las métricas solares quedan vacías.
-5. **Ejecutar**: clic derecho en `src/run_all.py` → *Run 'run_all'*.
+4. **Ejecutar**: clic derecho en `src/run_all.py` → *Run 'run_all'*.
    (Desde terminal: `cd src && python run_all.py`).
 
-La primera ejecución tarda varios minutos (unos 1.400 ficheros diarios de OMIE a partir de 2023).
+Todas las fuentes son públicas: no hace falta registrarse ni pedir ningún token.
+
+La primera ejecución tarda varios minutos (unos 1.400 ficheros diarios de OMIE a partir de 2023
+y un mes por petición de Energy-Charts, con pausas para respetar su límite de peticiones).
 Las siguientes son rápidas porque no se vuelve a descargar lo que ya está en disco.
 
 ## CSV generados (data/processed/)
@@ -80,6 +82,7 @@ Las siguientes son rápidas porque no se vuelve a descargar lo que ya está en d
 | `metricas_mensuales.csv` | 1 fila por año-mes | Línea temporal de precio baseload vs. capturado solar; estacionalidad |
 | `bateria_diaria.csv` | 1 fila por día | Distribución del spread diario y del margen de la batería |
 | `perfil_hora_mes.csv` | Año × mes × hora | Mapa de calor hora × mes del precio y de la producción solar ("curva de pato") |
+| `validacion_solar_diaria.csv` | 1 fila por día | Control de calidad: solar diaria de Energy-Charts frente al dato oficial de REE (diferencia % y cuota de termosolar) |
 
 ### ⚠️ Importar en Power BI
 
@@ -98,7 +101,7 @@ Si no, los decimales se leerán mal (p. ej. 63.33 → 6333).
 | `capture_rate` | precio capturado solar / precio baseload de las mismas horas. < 1 indica canibalización |
 | `pct_horas_cero_o_negativo` | % de horas con precio ≤ 0 €/MWh |
 | `pct_horas_negativo` | % de horas con precio < 0 €/MWh |
-| `solar_gwh` | Generación solar fotovoltaica total (GWh) |
+| `solar_gwh` | Generación solar total, fotovoltaica + termosolar (GWh) |
 | `horas` / `anio_completo` | Horas con dato; el año es completo si tiene ≥ 8.760 horas |
 | `precio_carga` / `precio_descarga` | Media de las 4 horas más baratas / más caras del día |
 | `spread` | precio_descarga − precio_carga |

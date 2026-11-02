@@ -1,10 +1,13 @@
 """
 Limpieza y preparación de los datos.
 
-Entradas:  data/raw/omie/*.1  y  data/raw/esios/*.csv
-Salidas:   data/processed/precios_periodos.csv     (granularidad original de OMIE)
-           data/processed/electricidad_horaria.csv (una fila por hora, con solar y demanda)
-           docs/calidad_datos.md                   (informe de calidad generado automáticamente)
+Entradas:  data/raw/omie/marginalpdbc_*      (precios de OMIE)
+           data/raw/energy_charts/AAAA-MM.csv (solar y demanda de Energy-Charts)
+           data/raw/redata/AAAA.csv           (solar diaria oficial de REE, para validar)
+Salidas:   data/processed/precios_periodos.csv         (granularidad original de OMIE)
+           data/processed/electricidad_horaria.csv     (una fila por hora, con solar y demanda)
+           data/processed/validacion_solar_diaria.csv  (solar diaria Energy-Charts vs. REE)
+           docs/calidad_datos.md                       (informe de calidad generado automáticamente)
 """
 
 import pandas as pd
@@ -160,32 +163,41 @@ def anadir_hora_local(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 4. ESIOS: solar y demanda
+# 4. Energy-Charts: solar y demanda
 # ---------------------------------------------------------------------------
-def leer_indicador_esios(nombre: str) -> pd.DataFrame | None:
-    """Lee todos los CSV mensuales de un indicador y los deja en una fila por hora UTC."""
-    ficheros = sorted(config.RAW_ESIOS.glob(f"{nombre}_*.csv"))
+def leer_energy_charts(calidad: dict) -> pd.DataFrame:
+    """
+    Lee todos los CSV mensuales de Energy-Charts y los deja en una fila por hora UTC.
+
+    Los datos vienen en MW cada 60 min (2019) o cada 15 min (años recientes).
+    La media de la potencia (MW) durante una hora es la energía de esa hora (MWh),
+    así que basta con hacer la media de los periodos de cada hora UTC.
+    """
+    ficheros = sorted(config.RAW_ENERGY_CHARTS.glob("*.csv"))
     if not ficheros:
-        return None
-    df = pd.concat([pd.read_csv(f) for f in ficheros if f.stat().st_size > 0], ignore_index=True)
-    if df.empty:
-        return None
-    if df["geo_name"].nunique() > 1:
-        df = df[df["geo_name"] == config.ESIOS_ZONA_PREFERIDA]
-    df["hora_utc"] = pd.to_datetime(df["datetime_utc"], utc=True).dt.floor("h")
-    return df.groupby("hora_utc")["value"].mean().rename(nombre).reset_index()
+        raise FileNotFoundError("No hay ficheros de Energy-Charts. Ejecuta antes download_energy_charts.py")
+    df = pd.concat([pd.read_csv(f) for f in ficheros], ignore_index=True)
+    df["datetime_utc"] = pd.to_datetime(df["datetime_utc"], utc=True)
+
+    # Duplicados de instante (p. ej. si dos meses se solapan)
+    calidad["ec_filas"] = len(df)
+    calidad["ec_duplicados"] = int(df.duplicated("datetime_utc").sum())
+    df = df.drop_duplicates("datetime_utc").sort_values("datetime_utc")
+
+    # Periodos sin dato (null en la API)
+    calidad["ec_nulos_solar"] = int(df["solar_mw"].isna().sum())
+    calidad["ec_nulos_demanda"] = int(df["demanda_mw"].isna().sum())
+
+    df["hora_utc"] = df["datetime_utc"].dt.floor("h")
+    return (df.groupby("hora_utc")
+              .agg(solar_mwh=("solar_mw", "mean"), demanda_mwh=("demanda_mw", "mean"))
+              .reset_index())
 
 
-def unir_esios(horario: pd.DataFrame, calidad: dict) -> pd.DataFrame:
-    """Une solar y demanda a la tabla horaria (left join por hora UTC)."""
-    columnas = {"solar_fv_mw": "solar_mwh", "demanda_mw": "demanda_mwh"}
-    for nombre, columna in columnas.items():
-        datos = leer_indicador_esios(nombre)
-        if datos is None:
-            horario[columna] = float("nan")
-            calidad[f"cobertura_{columna}"] = 0.0
-            continue
-        horario = horario.merge(datos.rename(columns={nombre: columna}), on="hora_utc", how="left")
+def unir_solar_demanda(horario: pd.DataFrame, calidad: dict) -> pd.DataFrame:
+    """Une solar y demanda a la tabla horaria de precios (left join por hora UTC)."""
+    horario = horario.merge(leer_energy_charts(calidad), on="hora_utc", how="left")
+    for columna in ["solar_mwh", "demanda_mwh"]:
         calidad[f"cobertura_{columna}"] = horario[columna].notna().mean() * 100
 
     # Generación solar negativa (consumo auxiliar nocturno) => 0
@@ -193,6 +205,46 @@ def unir_esios(horario: pd.DataFrame, calidad: dict) -> pd.DataFrame:
     calidad["solar_negativos_a_cero"] = int(negativos.sum())
     horario.loc[negativos, "solar_mwh"] = 0.0
     return horario
+
+
+def validar_solar_con_ree(horario: pd.DataFrame, calidad: dict) -> None:
+    """
+    Compara la solar diaria de Energy-Charts (suma de las horas de cada día local)
+    con el dato diario oficial de REE (REData, fotovoltaica + termosolar, Península).
+
+    Salida: data/processed/validacion_solar_diaria.csv y un resumen anual en calidad.
+    """
+    ficheros = sorted(config.RAW_REDATA.glob("*.csv"))
+    if not ficheros:
+        calidad["validacion_anual"] = None
+        return
+    ree = pd.concat([pd.read_csv(f) for f in ficheros], ignore_index=True)
+    ree["solar_ree_mwh"] = ree["solar_fv_mwh"] + ree["solar_termica_mwh"]
+
+    diaria = (horario.groupby("fecha")["solar_mwh"].sum(min_count=1)
+                     .rename("solar_energy_charts_mwh").reset_index())
+    diaria = diaria.merge(ree, on="fecha", how="inner").dropna()
+    diaria["diferencia_pct"] = (diaria["solar_energy_charts_mwh"] / diaria["solar_ree_mwh"] - 1) * 100
+    diaria["cuota_termosolar_pct"] = diaria["solar_termica_mwh"] / diaria["solar_ree_mwh"] * 100
+
+    columnas = ["fecha", "solar_energy_charts_mwh", "solar_fv_mwh", "solar_termica_mwh",
+                "solar_ree_mwh", "diferencia_pct", "cuota_termosolar_pct"]
+    diaria[columnas].round(4).to_csv(config.DATA_PROCESSED / "validacion_solar_diaria.csv", index=False)
+
+    # Resumen anual (solo días con dato en las dos fuentes)
+    diaria["anio"] = diaria["fecha"].str[:4]
+    diaria["diferencia_abs_pct"] = diaria["diferencia_pct"].abs()
+    anual = diaria.groupby("anio").agg(
+        ec_gwh=("solar_energy_charts_mwh", "sum"),
+        ree_gwh=("solar_ree_mwh", "sum"),
+        termica_gwh=("solar_termica_mwh", "sum"),
+        mediana_dif_abs_pct=("diferencia_abs_pct", "median"),
+    )
+    anual[["ec_gwh", "ree_gwh", "termica_gwh"]] /= 1000
+    anual["diferencia_anual_pct"] = (anual["ec_gwh"] / anual["ree_gwh"] - 1) * 100
+    anual["cuota_termosolar_pct"] = anual["termica_gwh"] / anual["ree_gwh"] * 100
+    calidad["validacion_anual"] = anual.reset_index()
+    calidad["validacion_dias"] = len(diaria)
 
 
 # ---------------------------------------------------------------------------
@@ -237,18 +289,40 @@ def escribir_informe(calidad: dict, horario: pd.DataFrame) -> None:
         "",
         f"**Días con periodos incorrectos:** {lista(calidad['dias_periodos_incorrectos'])}",
         "",
-        "## Solar y demanda (ESIOS)",
+        "## Solar y demanda (Energy-Charts)",
         "",
         "| Indicador | Valor |",
         "|---|---|",
+        f"| Filas leídas (granularidad original: 60 min en 2019, 15 min en años recientes) | {calidad['ec_filas']:,} |",
+        f"| Duplicados de instante eliminados | {calidad['ec_duplicados']} |",
+        f"| Periodos sin dato de solar | {calidad['ec_nulos_solar']} |",
+        f"| Periodos sin dato de demanda | {calidad['ec_nulos_demanda']} |",
         f"| Cobertura solar (% de horas con dato) | {calidad['cobertura_solar_mwh']:.2f} % |",
         f"| Cobertura demanda (% de horas con dato) | {calidad['cobertura_demanda_mwh']:.2f} % |",
         f"| Valores de solar negativos puestos a 0 | {calidad['solar_negativos_a_cero']} |",
         "",
+        "La serie «Solar» de Energy-Charts es **fotovoltaica + termosolar** juntas.",
+        "",
+        "## Validación de la solar contra REE (REData, dato diario oficial)",
+        "",
     ]
-    if calidad["cobertura_solar_mwh"] == 0:
-        lineas.append("> ⚠️ No hay datos de ESIOS (falta `ESIOS_TOKEN` en `.env`). "
-                      "Las métricas de precio capturado solar quedan vacías.")
+    anual = calidad["validacion_anual"]
+    if anual is None:
+        lineas += ["> ⚠️ No hay datos de REData. Ejecuta `download_redata.py` para generar la validación.", ""]
+    else:
+        lineas += [
+            "Se suma la solar horaria de Energy-Charts de cada día (hora de Madrid) y se compara con la",
+            "generación diaria oficial de REE en la Península (fotovoltaica + solar térmica, porque",
+            "Energy-Charts da las dos juntas). Diferencia = (Energy-Charts / REE − 1) × 100.",
+            f"Días comparados: {calidad['validacion_dias']:,}. "
+            "Detalle diario en `data/processed/validacion_solar_diaria.csv`.",
+            "",
+            "| Año | Energy-Charts (GWh) | REE (GWh) | Diferencia anual | Mediana dif. diaria (abs) | Cuota termosolar |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in anual.itertuples():
+            lineas.append(f"| {r.anio} | {r.ec_gwh:,.0f} | {r.ree_gwh:,.0f} | {r.diferencia_anual_pct:+.2f} % "
+                          f"| {r.mediana_dif_abs_pct:.2f} % | {r.cuota_termosolar_pct:.1f} % |")
         lineas.append("")
 
     config.DOCS.mkdir(parents=True, exist_ok=True)
@@ -274,7 +348,8 @@ def main() -> None:
 
     print("Pasando a resolución horaria...")
     horario = anadir_hora_local(a_horario(periodos))
-    horario = unir_esios(horario, calidad)
+    horario = unir_solar_demanda(horario, calidad)
+    validar_solar_con_ree(horario, calidad)
 
     # Salida 2: tabla horaria (hora UTC en texto, sin zona, para Power BI)
     horario["hora_utc"] = horario["hora_utc"].dt.strftime("%Y-%m-%d %H:%M")
